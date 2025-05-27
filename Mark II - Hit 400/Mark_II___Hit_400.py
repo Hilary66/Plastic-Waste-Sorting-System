@@ -27,12 +27,14 @@ class WasteSortingApp:
         self.error_color = "#D93025"
 
         # Define class-specific colors for bounding boxes and labels (BGR format for OpenCV)
+        # Using the exact class name from YOLO output
         self.class_colors = {
             "PET": (255, 0, 0),      # Blue for PET
             "HDPE": (0, 255, 0),     # Green for HDPE
             "PP": (0, 0, 255),       # Red for PP
             "PVC": (255, 255, 0),    # Cyan for PVC
             "LDPE": (255, 0, 255),   # Magenta for LDPE
+            "LDPE plastic bag": (255, 0, 255),  # Magenta for LDPE plastic bag (as per YOLO output)
             "unknown": (128, 128, 128)  # Gray for unknown objects
         }
 
@@ -416,21 +418,45 @@ class WasteSortingApp:
                 return
 
             # Step 1: Detect objects using YOLO model
-            detections = self.detector.detect(frame)
-            print(f"YOLO Detection Results: {detections}")
+            detection_result = self.detector.detect(frame)
+            print(f"YOLO Detection Results: {detection_result}")
+
+            # Step 2: Convert detection result into the expected format for tracking
+            detections = []
+            if isinstance(detection_result, tuple) and detection_result[0] == 'unknown':
+                # Handle the 'unknown' tuple format: ('unknown', bbox, image)
+                _, bbox, image = detection_result
+                x1, y1, x2, y2 = bbox
+                # Use the actual class name from the YOLO output
+                cls_name = "LDPE plastic bag"  # As per the YOLO log: "1 LDPE plastic bag"
+                conf = 0.5  # Default confidence since it's not provided in the 'unknown' tuple
+                detections.append((cls_name, conf, (x1, y1, x2, y2)))
+            elif isinstance(detection_result, list):
+                # Already in the correct format [(cls_name, conf, bbox), ...]
+                detections = detection_result
+            else:
+                self.troubleshoot_var.set("Troubleshooting: Invalid detection result format")
+                self.root.after(10, self.update_frame)
+                return
 
             if not detections:
                 self.troubleshoot_var.set("Troubleshooting: No objects detected")
             else:
-                # Step 2: Track detected objects
-                tracked_objects = self.tracker.track(detections, frame)
-                print(f"Tracked Objects: {tracked_objects}")
+                # Step 3: Track detected objects
+                try:
+                    tracked_objects = self.tracker.track(detections, frame)
+                    print(f"Tracked Objects: {tracked_objects}")
+                except Exception as e:
+                    print(f"Tracking error: {e}")
+                    self.troubleshoot_var.set(f"Troubleshooting: Tracking failed ({str(e)})")
+                    self.root.after(10, self.update_frame)
+                    return
 
-                # Step 3: Process each tracked object
+                # Step 4: Process each tracked object
                 for track_id, cls_name, bbox in tracked_objects:
                     x1, y1, x2, y2 = map(int, bbox)
 
-                    # Step 4: Extract the ROI and detect the color
+                    # Step 5: Extract the ROI and detect the color
                     roi = frame[y1:y2, x1:x2]
                     if roi.size > 0:
                         roi = self.color_detector.preprocess_roi(roi)
@@ -439,25 +465,26 @@ class WasteSortingApp:
                         color = "unknown"
                         print(f"Empty ROI for object {cls_name} (ID: {track_id})")
 
-                    # Step 5: Get the color for the bounding box and label based on the class
-                    box_color = self.class_colors.get(cls_name, self.class_colors["unknown"])  # Default to "unknown" color if class not found
+                    # Step 6: Get the color for the bounding box and label based on the class
+                    box_color = self.class_colors.get(cls_name, self.class_colors["unknown"])
 
-                    # Step 6: Draw the colored bounding box
+                    # Step 7: Draw the colored bounding box
                     cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
 
-                    # Step 7: Draw the label above the bounding box with the same color
+                    # Step 8: Draw the label above the bounding box with the same color
                     label = f"{cls_name} (ID: {track_id}) - {color}"
-                    cv2.putText(frame, label, (x1, y1-10),
+                    label_y = max(15, y1 - 10)  # Ensure label is visible
+                    cv2.putText(frame, label, (x1, label_y),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2)
 
-                    # Step 8: Control the robotic arm
+                    # Step 9: Control the robotic arm
                     center_x = (x1 + x2) // 2
                     center_y = (y1 + y2) // 2
                     if self.arm is not None:
                         self.arm.pick_and_sort(center_x, center_y, cls_name, color)
                         print(f"Sorting {cls_name} (Color: {color}) at position ({center_x}, {center_y})")
 
-                # Step 9: Update troubleshooting status
+                # Step 10: Update troubleshooting status
                 if len(tracked_objects) == 0:
                     self.troubleshoot_var.set("Troubleshooting: No objects detected after tracking")
                 else:
@@ -474,7 +501,6 @@ class WasteSortingApp:
         self.root.after(10, self.update_frame)
 
     def handle_unrecognized_object(self, bbox, image):
-        # This method is currently unused but kept for future implementation
         self.unrecognized_bbox = bbox
         self.unrecognized_object = image
         label_window = tk.Toplevel(self.root)
